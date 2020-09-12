@@ -1,0 +1,81 @@
+#!/usr/bin/env python
+# Usage is sresources <queue>. It defaults to default_gpu if queue is not specified.
+
+import subprocess
+import re
+from colorama import Fore, Back, Style
+import sys
+
+queue = 'default_gpu' if len(sys.argv) == 1 else sys.argv[1]
+
+process = subprocess.Popen('scontrol -o show nodes'.split(), stdout=subprocess.PIPE)
+out, err = process.communicate()
+
+lines = out.decode('utf-8').split('\n')
+infos = []
+for line in lines:
+    if len(line) == 0:
+        continue
+    info = {}
+
+    info['name'] = re.search(r'NodeName=([^\s]*)', line).group(1)
+    total = re.search(r'CfgTRES=([^\s]*)', line).group(1)
+    alloc = re.search(r'AllocTRES=([^\s]*)', line).group(1)
+    def process(x):
+        if len(x) == 0:
+            return {}
+        x = x.split(',')
+        x = [i.split('=') for i in x]
+        def processVal(v):
+            if v[-1] == 'M':
+                return round(float(v[:-1])/1024)
+            if v[-1] == 'G':
+                return round(float(v[:-1]))
+            else:
+                return int(v)
+        x = {k: processVal(v) for k,v in x}
+        return x
+    info['total'] = process(total)
+    info['alloc'] = process(alloc)
+    info['state'] = re.search(r'State=([^\s]*)', line).group(1)
+    partitions = re.search(r'Partitions=([^\s]*)', line)
+    info['partitions'] = [] if partitions is None else partitions.group(1).split(',')
+    infos.append(info)
+    
+
+def format_dict(d):
+    out = ''
+    useful = ['cpu', 'mem', 'gres/gpu']
+    for k, v in d.items():
+        if k not in useful:
+            continue
+        if k == 'mem':
+            v = str(v)+'G'
+        out += f'{k}={v}, '
+    return out.rstrip(', ')
+
+def in_partition(node, partition):
+    return partition in node['partitions']
+
+title = f"{Style.BRIGHT}{'Name':<16}\t {'Remaining Resources': <30} {'Total Resources': <30} State {Style.RESET_ALL}"
+print(title)
+print('-'*len(title))
+for node in infos:
+    if not in_partition(node, queue):
+        continue
+
+    remaining = {k: node['total'][k] - (node['alloc'][k] if k in node['alloc'] else 0) for k in node['total'].keys()}
+    style = ''
+    if 'DRAIN' in node['state']:
+        style += Style.DIM
+    if remaining['cpu'] == 0 or remaining['gres/gpu'] == 0 or remaining['mem'] <= 1:
+        style += Style.DIM
+    if style == '':
+        style = Style.BRIGHT
+    print(f"{style}{node['name']:<16}\t {format_dict(remaining): <30} {format_dict(node['total']): <30} {node['state']} {Style.RESET_ALL}")
+
+total_gpus = [int(i['total']['gres/gpu']) for i in infos if 'gres/gpu' in i['total'] and in_partition(i, queue)]
+used_gpus = [int(i['alloc']['gres/gpu']) for i in infos if 'gres/gpu' in i['alloc'] and in_partition(i, queue)]
+
+print(f'Available GPUs: {sum(total_gpus) - sum(used_gpus)}')
+print(f'Total GPUs:     {sum(total_gpus)}')
